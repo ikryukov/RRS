@@ -239,6 +239,15 @@ int RouteViewer::run()
         }
     }
 
+    // Report dedup stats from all database pagers
+    for (auto& task : viewer->recordAndSubmitTasks)
+    {
+        if (auto pager = task->databasePager.cast<AnimatedDatabasePager>())
+        {
+            pager->reportDedupStats();
+        }
+    }
+
     return 0;
 }
 
