@@ -210,38 +210,6 @@ void VehiclesHandler::step(double t, double dt)
 
         vehicles[i].right = vsg::cross(vehicles[i].orth, vehicles[i].up);
 
-        // May be delete attitude?? Not used anywhere
-        double attitude_z;
-        if (vehicles[i].orth.x > vehicles[i].orth.y)
-        {
-            if (vehicles[i].orth.x > -vehicles[i].orth.y)
-            {
-                attitude_z = std::acos(vehicles[i].orth.y);
-            }
-            else
-            {
-                attitude_z = vsg::numbers<double>::PI() - std::asin(vehicles[i].orth.x);
-            }
-        }
-        else
-        {
-            if (vehicles[i].orth.x > -vehicles[i].orth.y)
-            {
-                attitude_z = std::asin(vehicles[i].orth.x);
-            }
-            else
-            {
-                attitude_z = -std::acos(vehicles[i].orth.y);
-            }
-        }
-
-        vehicles[i].attitude = vsg::dvec3(
-            std::asin(vehicles[i].orth.z),
-            0.0,
-            attitude_z
-        );
-
-
         const vsg::dmat4 rotate_matrix{vehicles[i].right.x,vehicles[i].right.y,vehicles[i].right.z,0.0,
                                        vehicles[i].orth.x, vehicles[i].orth.y, vehicles[i].orth.z, 0.0,
                                        vehicles[i].up.x,   vehicles[i].up.y,   vehicles[i].up.z,   0.0,

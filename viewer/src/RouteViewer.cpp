@@ -35,7 +35,6 @@
 #include <vsg/maths/transform.h>
 #include <vsg/maths/vec3.h>
 #include <vsg/nodes/CullNode.h>
-#include <vsg/nodes/InstanceNode.h>
 #include <vsg/nodes/PagedLOD.h>
 #include <vsg/nodes/RegionOfInterest.h>
 #include <vsg/nodes/StateGroup.h>
@@ -58,8 +57,10 @@
 
 #include <QApplication>
 
+#include <chrono>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 #include <AltSoundLocker.h>
 
@@ -172,29 +173,70 @@ int RouteViewer::run()
 {
     // Обрабатываем события сетевой подсистемы, дожидаемся загрузки и
     // инициализации все объектов
+    constexpr int MAX_WAIT_ITERATIONS = 600; // ~60s at 100ms per iteration
+    int wait_count = 0;
     while (!is_ready)
     {
         QApplication::processEvents();
-    }
 
-    // viewer->setupThreading(); // Эта функция была в одном из vsgExamples
-                                 // Вызывает ошибку на выходе из вьювера
-
-    // Главный цикл рендеринга
-    while (viewer->advanceToNextFrame())
-    {
-        QApplication::processEvents();
-
-        viewer->handleEvents();
-        viewer->update();
-
-        if (screenshot_writer->isScreeenshot())
+        if (is_connection_abandoned)
         {
-            screenshot_writer->doScreeenshot(window, options);
+            LOG_ERROR("Cannot start rendering — no connection to simulator");
+            return 1;
         }
 
-        viewer->recordAndSubmit();
-        viewer->present();
+        if (++wait_count >= MAX_WAIT_ITERATIONS)
+        {
+            LOG_ERROR("Timed out waiting for simulator data");
+            return 1;
+        }
+    }
+
+    // Главный цикл рендеринга
+    using clock = std::chrono::steady_clock;
+    const auto frame_duration = (settings.max_fps > 0)
+        ? std::chrono::microseconds(1000000 / settings.max_fps)
+        : std::chrono::microseconds(0);
+
+    while (viewer->advanceToNextFrame())
+    {
+        try
+        {
+            auto frame_start = clock::now();
+
+            QApplication::processEvents();
+
+            viewer->handleEvents();
+            viewer->update();
+
+            if (screenshot_writer && screenshot_writer->isScreeenshot())
+            {
+                screenshot_writer->doScreeenshot(window, options);
+            }
+
+            viewer->recordAndSubmit();
+            viewer->present();
+
+            // Sleep to maintain target frame rate and avoid 100% CPU
+            if (frame_duration.count() > 0)
+            {
+                auto elapsed = clock::now() - frame_start;
+                if (elapsed < frame_duration)
+                {
+                    std::this_thread::sleep_for(frame_duration - elapsed);
+                }
+            }
+        }
+        catch (const vsg::Exception& e)
+        {
+            LOG_ERROR("Vulkan error in render loop: %s (VkResult %d)", e.message.c_str(), e.result);
+            break;
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("Exception in render loop: %s", e.what());
+            break;
+        }
     }
 
     return 0;
@@ -312,7 +354,7 @@ void RouteViewer::initWindowTraits()
 
     // Настройка вертикальной синхронизации (упрощенно - вкл/выкл)
     windowTraits->swapchainPreferences.presentMode = settings.vsync ? VK_PRESENT_MODE_FIFO_KHR
-                                                                    : VK_PRESENT_MODE_IMMEDIATE_KHR;
+                                                                    : VK_PRESENT_MODE_MAILBOX_KHR;
 
     // auto deviceFeatures = windowTraits->deviceFeatures = vsg::DeviceFeatures::create(); // VSG и так создает deviceFeatures по умолчанию
     // deviceFeatures->get().samplerAnisotropy = VK_TRUE;                                  // и выставляет samplerAnisotropy в true
@@ -338,7 +380,17 @@ void RouteViewer::initWindow(bool try_screenNum_exception)
             LOG_WARN(exception.message.c_str());
             LOG_WARN("Try to use default display...");
             windowTraits->screenNum = -1;
-            initWindow(false);
+            try
+            {
+                window = vsg::Window::create(windowTraits);
+                lockAltSound(window.get());
+            }
+            catch (const vsg::Exception& e2)
+            {
+                LOG_FATAL(e2.message.c_str());
+                LOG_FATAL("Fail to create window on fallback display");
+                exit(1);
+            }
         }
         else
         {
@@ -568,16 +620,12 @@ void RouteViewer::loadCustomShader(
     auto frag_shader_path = shaders_dir_path + fs.separator() + frag_shader_filename;
     auto frag_shader_stage = vsg::ShaderStage::read(VK_SHADER_STAGE_FRAGMENT_BIT, "main", frag_shader_path, options);
 
-    if (!vert_shader_stage)
+    if (!vert_shader_stage || !frag_shader_stage)
     {
-        LOG_WARN("Failed to load vertex shader: %s", vert_shader_path.c_str());
-        LOG_INFO("Using default %s shader set", shader_set_name);
-        return;
-    }
-
-    if (!frag_shader_stage)
-    {
-        LOG_WARN("Failed to load fragment shader: %s", frag_shader_path.c_str());
+        if (!vert_shader_stage)
+            LOG_WARN("Failed to load vertex shader: %s", vert_shader_path.c_str());
+        if (!frag_shader_stage)
+            LOG_WARN("Failed to load fragment shader: %s", frag_shader_path.c_str());
         LOG_INFO("Using default %s shader set", shader_set_name);
         return;
     }
@@ -667,17 +715,21 @@ void RouteViewer::initViewer()
 
     // Перед компиляцией вьювера применяем некоторые настройки
     auto resourceHints = vsg::ResourceHints::create();
-    // Указываем грузить модели в один поток, иначе будут дубликаты в памяти
-    resourceHints->numDatabasePagerReadThreads = 1;
+    resourceHints->numDatabasePagerReadThreads = 4;
     // Указываем разрешение карты теней
     resourceHints->shadowMapSize = {static_cast<uint32_t>(settings.shadow_resolution),
                                     static_cast<uint32_t>(settings.shadow_resolution)};
     // Указываем допустимое количество источников света
     resourceHints->numLightsRange = {static_cast<uint32_t>(settings.num_lights),
                                      static_cast<uint32_t>(settings.num_lights + 1)};
-    viewer->compile(resourceHints);
+    auto compileResult = viewer->compile(resourceHints);
+    if (!compileResult)
+    {
+        LOG_WARN("Viewer compile returned empty result — some resources may not have been compiled");
+    }
 
-    options->operationThreads = vsg::OperationThreads::create(1, viewer->status);
+    unsigned int numOpThreads = std::max(2u, std::thread::hardware_concurrency() / 2);
+    options->operationThreads = vsg::OperationThreads::create(numOpThreads, viewer->status);
 
     GUIparams->viewer = viewer;
     GUIparams->vehicles_handler = vehicles_handler;
@@ -699,6 +751,10 @@ void RouteViewer::initTcpClient()
     connect(tcp_client, &TcpClient::setSignalsData, this, &RouteViewer::slotGetSignalsData);
     connect(tcp_client, &TcpClient::setVehiclesInfo, this, &RouteViewer::slotGetVehicleInfoData);
     connect(tcp_client, &TcpClient::sendLogMessage, this, &RouteViewer::slotRecvLogMessage);
+    connect(tcp_client, &TcpClient::connectionAbandoned, this, [this]() {
+        LOG_ERROR("Connection to simulator abandoned — exiting viewer");
+        is_connection_abandoned = true;
+    });
 
     tcp_client->init(settings.tcp_config);
 
@@ -748,50 +804,7 @@ bool RouteViewer::loadRoute()
             continue;
         }
 
-        // if (transforms.size() > 1500)
-        // {
-        //     auto model = vsg::read_cast<vsg::Node>(model_filename_path, options);
-        //     if (!model)
-        //     {
-        //         continue;
-        //     }
-
-        //     auto translations = vsg::vec3Array::create(transforms.size());
-        //     auto rotations = vsg::quatArray::create(transforms.size());
-        //     auto scales = vsg::vec3Array::create(transforms.size());
-
-        //     auto instance_node = vsg::InstanceNode::create();
-        //     instance_node->firstInstance = 0;
-        //     instance_node->instanceCount = transforms.size();
-        //     instance_node->setTranslations(translations);
-        //     instance_node->setRotations(rotations);
-        //     instance_node->setScales(scales);
-        //     instance_node->child = model;
-
-        //     for (std::size_t i = 0; i < transforms.size(); ++i)
-        //     {
-        //         auto& transform = transforms.at(i);
-        //         transform.r_x = -vsg::radians(transform.r_x);
-        //         transform.r_y = -vsg::radians(transform.r_y);
-        //         transform.r_z = -vsg::radians(transform.r_z);
-
-        //         auto rotate_x = vsg::rotate(transform.r_x, vsg::vec3(1.0f, 0.0f, 0.0f));
-        //         auto rotate_y = vsg::rotate(transform.r_y, vsg::vec3(0.0f, 1.0f, 0.0f));
-        //         auto rotate_z = vsg::rotate(transform.r_z, vsg::vec3(0.0f, 0.0f, 1.0f));
-        //         auto translate = vsg::translate(transform.t_x, transform.t_y, transform.t_z);
-
-        //         auto matrix = translate * rotate_z * rotate_y * rotate_x;
-
-        //         vsg::decompose(matrix, translations->at(i), rotations->at(i), scales->at(i));
-        //     }
-
-        //     auto cull_node = vsg::CullNode::create();
-        //     cull_node->bound = vsg::dsphere(vsg::dvec3(0.0, 0.0, 0.0), settings.view_distance);
-        //     cull_node->child = instance_node;
-        //     route_root->addChild(cull_node);
-        // }
-        // else
-        // {
+        {
             auto pagedLOD = vsg::PagedLOD::create();
             pagedLOD->bound = vsg::dsphere(vsg::dvec3(0.0, 0.0, 0.0), settings.view_distance);
             pagedLOD->children[0] = vsg::PagedLOD::Child{0.1, {}};
@@ -814,9 +827,13 @@ bool RouteViewer::loadRoute()
 
                 matrix->matrix = translate * rotate_z * rotate_y * rotate_x;
                 matrix->addChild(pagedLOD);
-                route_root->addChild(matrix);
+
+                // Frustum-cull before the matrix push
+                vsg::dsphere cullBound(vsg::dvec3(transform.translation), settings.cull_radius);
+                auto cullNode = vsg::CullNode::create(cullBound, matrix);
+                route_root->addChild(cullNode);
             }
-        // }
+        }
     }
 
     route.object_ref.clear();

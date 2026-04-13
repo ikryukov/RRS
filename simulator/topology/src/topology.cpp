@@ -753,13 +753,13 @@ void Topology::step(double t, double dt)
         sw->step(t, dt);
     }
 
-    for (auto& signals_array : {signals_data.line_signals,
-                                signals_data.enter_signals,
-                                signals_data.route_signals,
-                                signals_data.exit_signals,
-                                signals_data.shunt_signals})
+    for (const auto* signals_array : {&signals_data.line_signals,
+                                      &signals_data.enter_signals,
+                                      &signals_data.route_signals,
+                                      &signals_data.exit_signals,
+                                      &signals_data.shunt_signals})
     {
-        for (Signal* const signal : signals_array)
+        for (Signal* const signal : *signals_array)
         {
             if (signal)
             {

@@ -108,6 +108,7 @@ private slots:
 
 private:
     bool  is_ready = false;
+    bool  is_connection_abandoned = false;
     bool  is_route = false;
     bool  is_signals = false;
     bool  is_vehicles = false;
