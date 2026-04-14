@@ -248,6 +248,14 @@ int RouteViewer::run()
         }
     }
 
+    // Report shared objects stats
+    if (options && options->sharedObjects)
+    {
+        LOG_INFO("=== SharedObjects report ===");
+        vsg::LogOutput output;
+        options->sharedObjects->report(output);
+    }
+
     return 0;
 }
 

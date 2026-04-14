@@ -1148,7 +1148,12 @@ bool Train::loadTrain(QString cfg_path, const init_data_t& init_data, int model_
                 vehicles.push_back(vehicle);
             }
 
-            vehicle_node = cfg.getNextSection();
+            // Advance to next <Vehicle> sibling directly, bypassing
+            // CfgReader::curNode which can be corrupted by nested calls.
+            QDomNode next = vehicle_node.nextSibling();
+            while (!next.isNull() && next.nodeName() != vehicle_node.nodeName())
+                next = next.nextSibling();
+            vehicle_node = next;
         }
     }
     else
