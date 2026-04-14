@@ -234,43 +234,31 @@ void VehiclesHandler::step(double t, double dt)
             vehicles[i].prev_vehicle = update_vehicles[new_state].vehicles[i].prev_vehicle;
             vehicles[i].next_vehicle = update_vehicles[new_state].vehicles[i].next_vehicle;
 
-            // Model animations update and step
             vehicles[i].step(static_cast<float>(t), static_cast<float>(dt), &(update_vehicles[new_state].vehicles[i].analogSignal));
+        }
+        else
+        {
+            vehicles[i].step(static_cast<float>(t), static_cast<float>(dt));
+        }
 
-            // Sounds update
-            for (auto sound_id : vehicles[i].sounds_id)
+        // Sound positions (common for both branches)
+        for (auto sound_id : vehicles[i].sounds_id)
+        {
+            const vsg::vec3 pos = vsg::vec3(vehicles[i].position) +
+                                  vsg::vec3(vehicles[i].right) * sound_manager->getLocalPositionX(sound_id) +
+                                  vsg::vec3(vehicles[i].orth) * sound_manager->getLocalPositionY(sound_id) +
+                                  vsg::vec3(vehicles[i].up) * sound_manager->getLocalPositionZ(sound_id);
+            sound_manager->setPosition(sound_id, pos.x, pos.y, pos.z);
+
+            if (update_state)
             {
-                const vsg::vec3 pos = vsg::vec3(vehicles[i].position) +
-                                      vsg::vec3(vehicles[i].right) * sound_manager->getLocalPositionX(sound_id) +
-                                      vsg::vec3(vehicles[i].orth) * sound_manager->getLocalPositionY(sound_id) +
-                                      vsg::vec3(vehicles[i].up) * sound_manager->getLocalPositionZ(sound_id);
-                sound_manager->setPosition(sound_id, pos.x, pos.y, pos.z);
                 sound_manager->setVelocity(sound_id, vehicles[i].velocity.x, vehicles[i].velocity.y, vehicles[i].velocity.z);
 
                 const std::size_t signal_id = sound_manager->getSignalID(sound_id);
                 if (signal_id < update_vehicles[new_state].vehicles[i].analogSignal.size())
-                {
                     sound_manager->setSoundSignal(sound_id, update_vehicles[new_state].vehicles[i].analogSignal[signal_id]);
-                }
                 else
-                {
                     sound_manager->setSoundSignal(sound_id, 0.0f);
-                }
-            }
-        }
-        else
-        {
-            // Model animations step
-            vehicles[i].step(static_cast<float>(t), static_cast<float>(dt));
-
-            // Sounds update
-            for (auto sound_id : vehicles[i].sounds_id)
-            {
-                const vsg::vec3 pos = vsg::vec3(vehicles[i].position) +
-                                      vsg::vec3(vehicles[i].right) * sound_manager->getLocalPositionX(sound_id) +
-                                      vsg::vec3(vehicles[i].orth) * sound_manager->getLocalPositionY(sound_id) +
-                                      vsg::vec3(vehicles[i].up) * sound_manager->getLocalPositionZ(sound_id);
-                sound_manager->setPosition(sound_id, pos.x, pos.y, pos.z);
             }
         }
     }
