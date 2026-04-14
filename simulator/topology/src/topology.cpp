@@ -384,6 +384,8 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
 //------------------------------------------------------------------------------
 VehicleController *Topology::getVehicleController(size_t idx)
 {
+    if (idx >= vehicle_control.size())
+        return nullptr;
     return vehicle_control[idx];
 }
 
@@ -1576,7 +1578,7 @@ void Topology::slotBuildRouteCommand(QByteArray &route_data)
     }
     Journal::instance()->info("Build route: founded from "
                               + rc.trajectory_begin + " to " + rc.trajectory_end
-                              + " through " + QString::number(route.trajectories.size()) + "trajectories");
+                              + " through " + QString::number(route.trajectories.size()) + " trajectories");
 
     set_switchs_by_route(route);
 }
@@ -1628,7 +1630,7 @@ void Topology::slotShuntingRouteCommand(QByteArray &route_data)
     }
     Journal::instance()->info("Build route: founded from "
                               + rc.trajectory_begin + " to " + rc.trajectory_end
-                              + " through " + QString::number(route.trajectories.size()) + "trajectories");
+                              + " through " + QString::number(route.trajectories.size()) + " trajectories");
 
     if (set_switchs_by_route(route))
     {
@@ -1892,6 +1894,9 @@ void Topology::slotGetTrajStateRequest(int vehicle_idx, int station_idx, QString
 //------------------------------------------------------------------------------
 void Topology::slotTrajChangeState(int vehicle_idx, bool is_busy, QString traj_name)
 {
+    if (vehicle_idx < 0 || static_cast<size_t>(vehicle_idx) >= vehicle_control.size())
+        return;
+
     // Определяем поезд, изменивший состояние траектории
     size_t train_idx = vehicle_control[vehicle_idx]->getTrainIndex();
 
