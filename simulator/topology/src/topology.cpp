@@ -365,6 +365,8 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
         }
         else
         {
+            // По идее мы уже проверили весь путь по топологии,
+            // и не должны попасть сюда, но на всякий случай обработаем
             delete vc;
             Journal::instance()->error(QString("Fail to place Vehicle #%1").arg(vehicle_control.size()) +
                                        " at traj: " + cur_traj->getName() +

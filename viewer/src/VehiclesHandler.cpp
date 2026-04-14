@@ -229,6 +229,7 @@ void VehiclesHandler::step(double t, double dt)
             );
         }
 
+        // Model animations update and step
         if (update_state)
         {
             vehicles[i].train_id = update_vehicles[new_state].vehicles[i].train_id;
@@ -243,7 +244,7 @@ void VehiclesHandler::step(double t, double dt)
             vehicles[i].step(static_cast<float>(t), static_cast<float>(dt));
         }
 
-        // Sound positions (common for both branches)
+        // Sounds update
         for (auto sound_id : vehicles[i].sounds_id)
         {
             const vsg::vec3 pos = vsg::vec3(vehicles[i].position) +

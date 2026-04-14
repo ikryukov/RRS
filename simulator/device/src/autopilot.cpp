@@ -137,6 +137,7 @@ void Autopilot::velocity_control(double t, double dt)
     v_ref = min(calcCurrentSpeedLimit(t, dt), v_ref);
 
     // Рассчитываем скорость по тормозной кривой до следующего ограничения
+    // (если оно больше, ну и пусть :))) )
     v_ref = min(v_ref, calcBrakeCurveSpeed(feedback->v_lim_next, feedback->limit_dist));
 
     // Расчитываем скорость по тормозной кривой до ближайшего сигнала
@@ -273,7 +274,8 @@ double Autopilot::calcAlsnSpeed(ALSN alsn_code, double signal_dist, double &v_ta
 
     case NO_CODE:
     {
-        // Ограничение скорости при отсутствии кода АЛСН (белый огонь)
+        // Тут, по идее, будет происходить торможение, а проверка бдительности
+        // не даст сорвать ЭПК
         constexpr double V_LIM_NO_CODE = 40.0;
         v_lim = V_LIM_NO_CODE;
         is_alsn_motion_allowed = true;
