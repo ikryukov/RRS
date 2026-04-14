@@ -365,13 +365,10 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
         }
         else
         {
-            // По идее мы уже проверили весь путь по топологии,
-            // и не должны попасть сюда, но на всякий случай обработаем
-            // В таком случае созданные к этому моменту VehicleController
-            // создадут утечку памяти
-            Journal::instance()->info(QString("Warning: fail to place Vehicle #%1").arg(vehicle_control.size()) +
-                                      " at traj: " + cur_traj->getName() +
-                                      QString(" %1 m from start").arg(traj_coord));
+            delete vc;
+            Journal::instance()->error(QString("Fail to place Vehicle #%1").arg(vehicle_control.size()) +
+                                       " at traj: " + cur_traj->getName() +
+                                       QString(" %1 m from start").arg(traj_coord));
             return false;
         }
    }
