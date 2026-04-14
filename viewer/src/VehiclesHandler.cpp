@@ -95,6 +95,8 @@ int VehiclesHandler::getControlledVehicleIndex() const noexcept
 //------------------------------------------------------------------------------
 int VehiclesHandler::getCurrentTrainIndex() const noexcept
 {
+    if (cur_vehicle < 0 || static_cast<std::size_t>(cur_vehicle) >= vehicles.size())
+        return -1;
     return vehicles[cur_vehicle].train_id;
 }
 
@@ -657,6 +659,9 @@ void VehiclesHandler::getVehiclesPosData4(QByteArray& data)
 //------------------------------------------------------------------------------
 void VehiclesHandler::updateDebugString()
 {
+    if (new_data < 0 || new_data >= DATA_ARRAY_SIZE)
+        return;
+
     // Дата-время сервера
     debug_message = update_pos_data[new_data].sim_time.getString() + "\n";
 
