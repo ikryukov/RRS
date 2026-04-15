@@ -309,15 +309,14 @@ void Train::couple(double current_distance, bool is_coupling_to_head, bool is_ot
 
                 // На всякий случай актуализируем положение ПЕ в топологии
                 // по старой дуговой координате
-                auto vc = topology->getVehicleController(model_idx);
-                if (!vc) continue;
-                vc->setPathCoord(vehicle->getDirection() * new_y[idx]);
+                auto& vc = topology->getVehicleController(model_idx);
+                vc.setPathCoord(vehicle->getDirection() * new_y[idx]);
 
                 vehicle->setDirection(-vehicle->getDirection());
 
                 // Новая дуговая координата
                 new_y[idx] = train_coord + other_veh_distances[i];
-                vc->setInitPathCoord(vehicle->getDirection() * new_y[idx]);
+                vc.setInitPathCoord(vehicle->getDirection() * new_y[idx]);
                 train_coord = new_y[idx];
             }
 
@@ -371,13 +370,12 @@ void Train::couple(double current_distance, bool is_coupling_to_head, bool is_ot
 
                 // На всякий случай актуализируем положение ПЕ в топологии
                 // по старой дуговой координате
-                auto vc = topology->getVehicleController(model_idx);
-                if (!vc) continue;
-                vc->setPathCoord(vehicle->getDirection() * new_y[idx]);
+                auto& vc = topology->getVehicleController(model_idx);
+                vc.setPathCoord(vehicle->getDirection() * new_y[idx]);
 
                 // Новая дуговая координата
                 new_y[idx] = train_coord + other_veh_distances[i - 1];
-                vc->setInitPathCoord(vehicle->getDirection() * new_y[idx]);
+                vc.setInitPathCoord(vehicle->getDirection() * new_y[idx]);
                 train_coord = new_y[idx];
             }
 
@@ -439,13 +437,12 @@ void Train::couple(double current_distance, bool is_coupling_to_head, bool is_ot
 
                 // На всякий случай актуализируем положение ПЕ в топологии
                 // по старой дуговой координате
-                auto vc = topology->getVehicleController(model_idx);
-                if (!vc) continue;
-                vc->setPathCoord(vehicle->getDirection() * new_y[idx]);
+                auto& vc = topology->getVehicleController(model_idx);
+                vc.setPathCoord(vehicle->getDirection() * new_y[idx]);
 
                 // Новая дуговая координата
                 new_y[idx] = train_coord - other_veh_distances[i];
-                vc->setInitPathCoord(vehicle->getDirection() * new_y[idx]);
+                vc.setInitPathCoord(vehicle->getDirection() * new_y[idx]);
                 train_coord = new_y[idx];
             }
 
@@ -484,15 +481,14 @@ void Train::couple(double current_distance, bool is_coupling_to_head, bool is_ot
 
                 // На всякий случай актуализируем положение ПЕ в топологии
                 // по старой дуговой координате
-                auto vc = topology->getVehicleController(model_idx);
-                if (!vc) continue;
-                vc->setPathCoord(vehicle->getDirection() * other_y[idx]);
+                auto& vc = topology->getVehicleController(model_idx);
+                vc.setPathCoord(vehicle->getDirection() * other_y[idx]);
 
                 vehicle->setDirection(-vehicle->getDirection());
 
                 // Новая дуговая координата
                 new_y[new_ode_order] = train_coord - other_veh_distances[i - 1];
-                vc->setInitPathCoord(vehicle->getDirection() * new_y[new_ode_order]);
+                vc.setInitPathCoord(vehicle->getDirection() * new_y[new_ode_order]);
                 train_coord = new_y[new_ode_order];
 
                 vehicle->setTrainIndex(train_idx);
@@ -973,12 +969,9 @@ void Train::slotStep(const simulator_time_t& current_time, const double& integra
             {
                 size_t model_idx = vehicle->getModelIndex();
                 size_t idx = vehicle->getStateIndex();
-                auto vc = topology->getVehicleController(model_idx);
-                if (vc)
-                {
-                    vc->setPathCoord(vehicle->getDirection() * y[idx]);
-                    *(vehicle->getProfilePoint()) = vc->getPosition();
-                }
+                auto& vc = topology->getVehicleController(model_idx);
+                vc.setPathCoord(vehicle->getDirection() * y[idx]);
+                *(vehicle->getProfilePoint()) = vc.getPosition();
             }
         }
     }

@@ -8,6 +8,7 @@
 #include    <vehicle-controller.h>
 #include    <topology.h>
 
+#include    <cassert>
 #include    <QDir>
 #include    <QDirIterator>
 #include    <QFile>
@@ -394,11 +395,10 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
 //------------------------------------------------------------------------------
 //
 //------------------------------------------------------------------------------
-VehicleController *Topology::getVehicleController(size_t idx)
+VehicleController& Topology::getVehicleController(size_t idx)
 {
-    if (idx >= vehicle_control.size())
-        return nullptr;
-    return vehicle_control[idx];
+    assert(idx < vehicle_control.size() && "VehicleController index out of range");
+    return *vehicle_control[idx];
 }
 
 //------------------------------------------------------------------------------

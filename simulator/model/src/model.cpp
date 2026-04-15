@@ -336,11 +336,9 @@ void Model::slotUpdateTrainTimetable(int train_idx)
             {
                 ap->setTimetable(timetable);
 
-                auto vc = topology->getVehicleController(vehicle->getModelIndex());
-                if (!vc)
-                    continue;
+                auto& vc = topology->getVehicleController(vehicle->getModelIndex());
 
-                disconnect(ap, &Autopilot::sigGetVehicleTrajPosition, vc, &VehicleController::slotGetVehicleTrajPosition);
+                disconnect(ap, &Autopilot::sigGetVehicleTrajPosition, &vc, &VehicleController::slotGetVehicleTrajPosition);
                 disconnect(ap, &Autopilot::sigIsRouteExists, topology, &Topology::slotIsRouteExists);
                 disconnect(ap, &Autopilot::sigGetRouteLength, topology, &Topology::slotGetRouteLength);
                 disconnect(this, &Model::sigInitTimetable, ap, &Autopilot::slotInitTimeTable);
@@ -354,7 +352,7 @@ void Model::slotUpdateTrainTimetable(int train_idx)
 
                 if (!timetable.stations.empty())
                 {
-                    connect(ap, &Autopilot::sigGetVehicleTrajPosition, vc, &VehicleController::slotGetVehicleTrajPosition);
+                    connect(ap, &Autopilot::sigGetVehicleTrajPosition, &vc, &VehicleController::slotGetVehicleTrajPosition);
                     connect(ap, &Autopilot::sigIsRouteExists, topology, &Topology::slotIsRouteExists);
                     connect(ap, &Autopilot::sigGetRouteLength, topology, &Topology::slotGetRouteLength);
                     connect(this, &Model::sigInitTimetable, ap, &Autopilot::slotInitTimeTable);
@@ -427,10 +425,7 @@ void Model::findNearestVehicles()
             // Ищем другую ПЕ в пределах 10 метров, и дистанцию до неё в данный момент
             double current_distance = 0.0;
             dir_t search_dir = static_cast<dir_t>(veh_dir);
-            auto vc_search = topology->getVehicleController(idx);
-            if (!vc_search)
-                continue;
-            int nearest_idx = vc_search->getNearestVehicle(
+            int nearest_idx = topology->getVehicleController(idx).getNearestVehicle(
                 current_distance, DISTANCE_TO_COUPLE_TRAINS, search_dir);
 
             // Если ничего не нашли - дальше делать нечего
