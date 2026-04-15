@@ -955,11 +955,13 @@ void RouteViewer::slotGetVehicleInfoData(QByteArray &data)
     connect(tcp_client.get(), &TcpClient::setTrainInfo,
             vehicles_handler.get(), &VehiclesHandler::slotGetTrainsData);
 
+    // Position and state data use DirectConnection — the SPSC ring buffer
+    // and atomic flags make these safe without locks
     connect(tcp_client.get(), &TcpClient::setVehiclesPositions,
-            vehicles_handler.get(), &VehiclesHandler::slotGetVehiclesPosData);
+            vehicles_handler.get(), &VehiclesHandler::slotGetVehiclesPosData, Qt::DirectConnection);
 
     connect(tcp_client.get(), &TcpClient::setVehiclesData,
-            vehicles_handler.get(), &VehiclesHandler::slotGetVehiclesStateData);
+            vehicles_handler.get(), &VehiclesHandler::slotGetVehiclesStateData, Qt::DirectConnection);
 
     connect(tcp_client.get(), &TcpClient::setVehicleControlled,
             vehicles_handler.get(), &VehiclesHandler::slotGetVehicleControlled);

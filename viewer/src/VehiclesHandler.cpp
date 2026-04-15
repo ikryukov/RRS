@@ -112,7 +112,8 @@ bool VehiclesHandler::isUpdated() const noexcept
 //------------------------------------------------------------------------------
 simulator_time_t *VehiclesHandler::getDateTime()
 {
-    return (pos_count >= 1) ? &pos_buf[pos_read % POS_BUF_SIZE].sim_time : nullptr;
+    return (pos_count.load(std::memory_order_relaxed) >= 1)
+        ? &pos_buf[pos_read % POS_BUF_SIZE].sim_time : nullptr;
 }
 
 //------------------------------------------------------------------------------
@@ -143,7 +144,7 @@ void VehiclesHandler::step(double t, double dt)
         return;
     }
 
-    const double client_time = ref_time + time_difference;
+    const double client_time = ref_time + time_difference.load(std::memory_order_relaxed);
 
     // Advance read head so pos_read is the first frame >= client_time
     advanceInterpolation(client_time);
@@ -442,7 +443,7 @@ void VehiclesHandler::slotGetTrainsData(QByteArray &data)
 //------------------------------------------------------------------------------
 void VehiclesHandler::slotGetVehiclesPosData(QByteArray& data)
 {
-    const size_t slot = pos_write % POS_BUF_SIZE;
+    const size_t slot = pos_write.load(std::memory_order_relaxed) % POS_BUF_SIZE;
     pos_buf[slot].deserialize(data);
 
     if (pos_buf[slot].vehicles.size() != vehicles.size())
@@ -452,20 +453,25 @@ void VehiclesHandler::slotGetVehiclesPosData(QByteArray& data)
         return;
     }
 
-    ++pos_write;
-    if (pos_count < POS_BUF_SIZE)
-        ++pos_count;
-
     // Exponential smoothing of time offset (converges quickly during startup)
-    const double alpha = (pos_count <= 3) ? 0.5 : 0.05;
-    time_difference = time_difference * (1.0 - alpha) +
-        (pos_buf[slot].sim_time.simulation_seconds - ref_time - settings_delay) * alpha;
+    const size_t count = pos_count.load(std::memory_order_relaxed);
+    const double alpha = (count < 3) ? 0.5 : 0.05;
+    const double td = time_difference.load(std::memory_order_relaxed);
+    time_difference.store(td * (1.0 - alpha) +
+        (pos_buf[slot].sim_time.simulation_seconds - ref_time - settings_delay) * alpha,
+        std::memory_order_relaxed);
+
+    // Publish: data is fully written, now make it visible to the reader
+    const size_t new_write = pos_write.load(std::memory_order_relaxed) + 1;
+    pos_write.store(new_write, std::memory_order_release);
+    if (count < POS_BUF_SIZE)
+        pos_count.store(count + 1, std::memory_order_release);
 
     // Initialize read heads once we have enough frames
-    if (pos_count == 3)
+    if (count + 1 == 3)
     {
-        pos_read_prev = pos_write - 3;
-        pos_read      = pos_write - 2;
+        pos_read_prev = new_write - 3;
+        pos_read      = new_write - 2;
     }
 }
 
@@ -514,8 +520,12 @@ void VehiclesHandler::slotGetVehicleControlled(QByteArray& data)
 void VehiclesHandler::advanceInterpolation(double client_time)
 {
     // Advance read head until pos_read is the first frame with time >= client_time
-    // but don't go past the latest written frame
-    const size_t latest = pos_write - 1;
+    // but don't go past the latest written frame.
+    // pos_write is atomic — snapshot it once to avoid torn reads in the loop.
+    const size_t write_snapshot = pos_write.load(std::memory_order_acquire);
+    if (write_snapshot == 0)
+        return;
+    const size_t latest = write_snapshot - 1;
     while (pos_read < latest &&
            client_time >= pos_buf[pos_read % POS_BUF_SIZE].sim_time.simulation_seconds)
     {
@@ -529,10 +539,11 @@ void VehiclesHandler::advanceInterpolation(double client_time)
 //------------------------------------------------------------------------------
 void VehiclesHandler::updateDebugString()
 {
-    if (pos_count == 0)
+    const size_t w = pos_write.load(std::memory_order_acquire);
+    if (w == 0)
         return;
 
-    auto& latest = pos_buf[(pos_write - 1) % POS_BUF_SIZE];
+    auto& latest = pos_buf[(w - 1) % POS_BUF_SIZE];
 
     // Дата-время сервера
     debug_message = latest.sim_time.getString() + "\n";

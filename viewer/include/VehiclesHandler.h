@@ -14,6 +14,7 @@
 #include <QString>
 
 #include <array>
+#include <atomic>
 #include <vector>
 
 struct settings_t;
@@ -104,16 +105,18 @@ private:
     SoundManager* sound_manager;
     const vsg::dvec3* camera_pos = nullptr;
 
-    /// Position data ring buffer — single-threaded (all via QueuedConnection)
-    static constexpr size_t POS_BUF_SIZE = 5;
+    /// Position data SPSC ring buffer (network thread writes, render thread reads)
+    /// Writer and reader always access different slots — no lock needed,
+    /// only pos_write/pos_count are atomic so the reader sees new data.
+    static constexpr size_t POS_BUF_SIZE = 8;
     std::array<simulator_update_pos_t, POS_BUF_SIZE> pos_buf;
-    size_t pos_write = 0;      ///< Next write slot (wraps around POS_BUF_SIZE)
-    size_t pos_count = 0;      ///< Total frames received (saturates at POS_BUF_SIZE)
-    size_t pos_read = 0;       ///< Current interpolation target index
-    size_t pos_read_prev = 0;  ///< Previous frame for interpolation
+    std::atomic<size_t> pos_write{0};  ///< Next write slot
+    std::atomic<size_t> pos_count{0};  ///< Frames received (saturates at POS_BUF_SIZE)
+    size_t pos_read = 0;               ///< Current interpolation target (render thread only)
+    size_t pos_read_prev = 0;          ///< Previous frame for interpolation (render thread only)
 
     double ref_time = 0.0;
-    double time_difference = 0.0;
+    std::atomic<double> time_difference{0.0};
     double settings_delay = 0.17;
 
     /// Data about trains, received from server
@@ -122,7 +125,7 @@ private:
     /// Vehicle state double buffer
     simulator_vehicles_update_t state_front;
     simulator_vehicles_update_t state_back;
-    bool is_new_state = false;
+    std::atomic<bool> is_new_state{false};
 
     /// Data about vehicles, received from server
     simulator_vehicles_info_t vehicles_info;
