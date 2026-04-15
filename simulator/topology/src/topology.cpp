@@ -320,6 +320,8 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
         }
     }
 
+    const size_t initial_vc_count = vehicle_control.size();
+
     for (size_t i = 0; i < vehicles->size(); ++i)
     {
         VehicleController *vc = new VehicleController;
@@ -371,6 +373,11 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
             Journal::instance()->error(QString("Fail to place Vehicle #%1").arg(vehicle_control.size()) +
                                        " at traj: " + cur_traj->getName() +
                                        QString(" %1 m from start").arg(traj_coord));
+
+            // Очищаем ранее размещённые контроллеры этого поезда
+            for (auto it = vehicle_control.begin() + initial_vc_count; it != vehicle_control.end(); ++it)
+                delete *it;
+            vehicle_control.erase(vehicle_control.begin() + initial_vc_count, vehicle_control.end());
             return false;
         }
    }

@@ -256,7 +256,15 @@ vsg::ref_ptr<vsg::Object> AnimatedDatabasePager::dedupRead(
     else
     {
         LOG_INFO("dedupRead: reusing in-flight load for %s", key.c_str());
-        return future.get();
+        try
+        {
+            return future.get();
+        }
+        catch (...)
+        {
+            LOG_WARN("dedupRead: in-flight load failed for %s", key.c_str());
+            return {};
+        }
     }
 }
 

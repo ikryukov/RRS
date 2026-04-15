@@ -337,6 +337,8 @@ void Model::slotUpdateTrainTimetable(int train_idx)
                 ap->setTimetable(timetable);
 
                 auto vc = topology->getVehicleController(vehicle->getModelIndex());
+                if (!vc)
+                    continue;
 
                 disconnect(ap, &Autopilot::sigGetVehicleTrajPosition, vc, &VehicleController::slotGetVehicleTrajPosition);
                 disconnect(ap, &Autopilot::sigIsRouteExists, topology, &Topology::slotIsRouteExists);
@@ -425,7 +427,10 @@ void Model::findNearestVehicles()
             // Ищем другую ПЕ в пределах 10 метров, и дистанцию до неё в данный момент
             double current_distance = 0.0;
             dir_t search_dir = static_cast<dir_t>(veh_dir);
-            int nearest_idx = topology->getVehicleController(idx)->getNearestVehicle(
+            auto vc_search = topology->getVehicleController(idx);
+            if (!vc_search)
+                continue;
+            int nearest_idx = vc_search->getNearestVehicle(
                 current_distance, DISTANCE_TO_COUPLE_TRAINS, search_dir);
 
             // Если ничего не нашли - дальше делать нечего

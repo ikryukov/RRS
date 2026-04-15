@@ -195,7 +195,8 @@ int RouteViewer::run()
     // Главный цикл рендеринга
     using clock = std::chrono::steady_clock;
     const auto frame_duration = (settings.max_fps > 0)
-        ? std::chrono::microseconds(1000000 / settings.max_fps)
+        ? std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::duration<double>(1.0 / settings.max_fps))
         : std::chrono::microseconds(0);
 
     while (viewer->advanceToNextFrame())
@@ -371,7 +372,7 @@ void RouteViewer::initWindowTraits()
 
     // Настройка вертикальной синхронизации (упрощенно - вкл/выкл)
     windowTraits->swapchainPreferences.presentMode = settings.vsync ? VK_PRESENT_MODE_FIFO_KHR
-                                                                    : VK_PRESENT_MODE_MAILBOX_KHR;
+                                                                    : VK_PRESENT_MODE_IMMEDIATE_KHR;
 
     // auto deviceFeatures = windowTraits->deviceFeatures = vsg::DeviceFeatures::create(); // VSG и так создает deviceFeatures по умолчанию
     // deviceFeatures->get().samplerAnisotropy = VK_TRUE;                                  // и выставляет samplerAnisotropy в true
@@ -846,7 +847,8 @@ bool RouteViewer::loadRoute()
                 matrix->addChild(pagedLOD);
 
                 // Frustum-cull before the matrix push
-                vsg::dsphere cullBound(vsg::dvec3(transform.translation), settings.cull_radius);
+                vsg::dsphere cullBound(vsg::dvec3(matrix->matrix[3][0], matrix->matrix[3][1], matrix->matrix[3][2]),
+                                      settings.cull_radius);
                 auto cullNode = vsg::CullNode::create(cullBound, matrix);
                 route_root->addChild(cullNode);
             }
