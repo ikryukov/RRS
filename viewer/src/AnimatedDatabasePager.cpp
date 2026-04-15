@@ -101,12 +101,12 @@ void AnimatedDatabasePager::start(uint32_t numReadThreads)
                             animatedDatabasePager.requestDiscarded(plod);
                         }
                     }
-                    catch (vsg::Exception e)
+                    catch (const vsg::Exception& e)
                     {
                         animatedDatabasePager.requestDiscarded(plod);
                         LOG_WARN("AnimatedDatabasePager: vsg::Exception (%s) while compiling model from file: %s", e.message.c_str(), plod->filename.string().c_str());
                     }
-                    catch (std::exception e)
+                    catch (const std::exception& e)
                     {
                         animatedDatabasePager.requestDiscarded(plod);
                         LOG_WARN("AnimatedDatabasePager: std::exception (%s) while compiling model from file: %s", e.what(), plod->filename.string().c_str());
@@ -244,7 +244,7 @@ vsg::ref_ptr<vsg::Object> AnimatedDatabasePager::dedupRead(
             promise->set_exception(std::current_exception());
             std::scoped_lock lock(_readMutex);
             _pendingReads.erase(key);
-            throw;
+            return {};
         }
         promise->set_value(result);
 

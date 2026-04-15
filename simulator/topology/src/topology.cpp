@@ -376,7 +376,13 @@ bool Topology::addTrain(const topology_pos_t &tp, std::vector<Vehicle *> *vehicl
 
             // Очищаем ранее размещённые контроллеры этого поезда
             for (auto it = vehicle_control.begin() + initial_vc_count; it != vehicle_control.end(); ++it)
+            {
+                for (auto vt = vc_table.begin(); vt != vc_table.end(); ++vt)
+                {
+                    if (vt->second == *it) { vc_table.erase(vt); break; }
+                }
                 delete *it;
+            }
             vehicle_control.erase(vehicle_control.begin() + initial_vc_count, vehicle_control.end());
             return false;
         }

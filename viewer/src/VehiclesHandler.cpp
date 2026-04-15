@@ -187,7 +187,7 @@ void VehiclesHandler::step(double t, double dt)
 
     // Interframe coordinate
     const double upd_dt = update_pos_data[cur_data].sim_time.simulation_seconds - update_pos_data[old_data].sim_time.simulation_seconds;
-    const double r = (client_time - update_pos_data[old_data].sim_time.simulation_seconds) / upd_dt;
+    const double r = (upd_dt > 0.0) ? (client_time - update_pos_data[old_data].sim_time.simulation_seconds) / upd_dt : 0.0;
     const double k = (1.0 - r);
 
     for (std::size_t i = 0; i < vehicles.size(); ++i)
