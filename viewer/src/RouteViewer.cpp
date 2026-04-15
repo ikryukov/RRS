@@ -187,7 +187,8 @@ int RouteViewer::run()
 
     // Главный цикл рендеринга
     using clock = std::chrono::steady_clock;
-    const auto frame_duration = (settings.max_fps > 0)
+    // Frame limiter only needed when vsync is off — FIFO already caps at refresh rate
+    const auto frame_duration = (!settings.vsync && settings.max_fps > 0)
         ? std::chrono::duration_cast<std::chrono::microseconds>(
               std::chrono::duration<double>(1.0 / settings.max_fps))
         : std::chrono::microseconds(0);
@@ -211,7 +212,7 @@ int RouteViewer::run()
             viewer->recordAndSubmit();
             viewer->present();
 
-            // Sleep to maintain target frame rate and avoid 100% CPU
+            // Frame limiter — only when vsync is off (FIFO already caps at refresh rate)
             if (frame_duration.count() > 0)
             {
                 auto elapsed = clock::now() - frame_start;
