@@ -75,14 +75,7 @@ RouteViewer::RouteViewer(QObject* parent)
 //------------------------------------------------------------------------------
 //
 //------------------------------------------------------------------------------
-RouteViewer::~RouteViewer()
-{
-    delete vehicles_handler;
-    delete traffic_lights_handler;
-    delete screenshot_writer;
-    delete sound_manager;
-    delete tcp_client;
-}
+RouteViewer::~RouteViewer() = default;
 
 //------------------------------------------------------------------------------
 //
@@ -97,16 +90,16 @@ void RouteViewer::initialize(int argc, char* argv[])
     LOG_INFO("Override settings from command line");
     overrideSettingsByCommandLine(argc, argv);
 
-    tcp_client = new TcpClient(this);
+    tcp_client = std::make_unique<TcpClient>(this);
     LOG_INFO("Created TcpClient");
 
-    sound_manager = new SoundManager();
+    sound_manager = std::make_unique<SoundManager>();
     LOG_INFO("Created SoundManager");
 
-    screenshot_writer = new ScreenshotWriter("screenshot.jpg");
+    screenshot_writer = std::make_unique<ScreenshotWriter>("screenshot.jpg");
 
-    traffic_lights_handler = new TrafficLightsHandler();
-    vehicles_handler = new VehiclesHandler(settings, sound_manager);
+    traffic_lights_handler = std::make_unique<TrafficLightsHandler>();
+    vehicles_handler = std::make_unique<VehiclesHandler>(settings, sound_manager.get());
 
     initVsgOptions();
     initWindowTraits();
@@ -466,12 +459,12 @@ void RouteViewer::initScenegraph()
     //     // root->addChild(skybox->getNode());
     // }
 
-    NewSkybox* nsb = new NewSkybox(cfg_path, options);
-    GUIparams->new_skybox = nsb;
+    skybox = std::make_unique<NewSkybox>(cfg_path, options);
+    GUIparams->new_skybox = skybox.get();
 
-    if (nsb->getNode())
+    if (auto node = skybox->getNode())
     {
-        root->addChild(nsb->getNode());
+        root->addChild(node);
     }
 }
 
@@ -696,19 +689,19 @@ void RouteViewer::initViewer()
 
     viewer->addWindow(window);
 
-    auto upd_server_control = UpdateControlToServerHandler::create(tcp_client);
+    auto upd_server_control = UpdateControlToServerHandler::create(tcp_client.get());
 
     upd_viewer_handler = UpdateViewerHandler::create(
         upd_server_control,
         camera,
         shadow_region,
-        screenshot_writer,
-        traffic_lights_handler,
-        vehicles_handler,
+        screenshot_writer.get(),
+        traffic_lights_handler.get(),
+        vehicles_handler.get(),
         settings
     );
 
-    auto upd_sound_manager_handler = UpdateSoundManagerHandler::create(lookAt, sound_manager);
+    auto upd_sound_manager_handler = UpdateSoundManagerHandler::create(lookAt, sound_manager.get());
     auto upd_statistis_handler = UpdateStatisticsHandler::create();
 
     auto close_viewer_handler = vsg::CloseHandler::create(viewer);
@@ -750,7 +743,7 @@ void RouteViewer::initViewer()
     options->operationThreads = vsg::OperationThreads::create(numOpThreads, viewer->status);
 
     GUIparams->viewer = viewer;
-    GUIparams->vehicles_handler = vehicles_handler;
+    GUIparams->vehicles_handler = vehicles_handler.get();
     GUIparams->statistics_handler = upd_statistis_handler.get();
     GUIparams->controls_handler = upd_server_control.get();
 
@@ -764,19 +757,19 @@ void RouteViewer::initTcpClient()
 {
     LOG_INFO("Starting init TCP-client");
 
-    connect(tcp_client, &TcpClient::connected, this, &RouteViewer::slotConnectedToSimulator);
-    connect(tcp_client, &TcpClient::setRouteInfo, this, &RouteViewer::slotGetRouteInfoData);
-    connect(tcp_client, &TcpClient::setSignalsData, this, &RouteViewer::slotGetSignalsData);
-    connect(tcp_client, &TcpClient::setVehiclesInfo, this, &RouteViewer::slotGetVehicleInfoData);
-    connect(tcp_client, &TcpClient::sendLogMessage, this, &RouteViewer::slotRecvLogMessage);
-    connect(tcp_client, &TcpClient::connectionAbandoned, this, [this]() {
+    connect(tcp_client.get(), &TcpClient::connected, this, &RouteViewer::slotConnectedToSimulator);
+    connect(tcp_client.get(), &TcpClient::setRouteInfo, this, &RouteViewer::slotGetRouteInfoData);
+    connect(tcp_client.get(), &TcpClient::setSignalsData, this, &RouteViewer::slotGetSignalsData);
+    connect(tcp_client.get(), &TcpClient::setVehiclesInfo, this, &RouteViewer::slotGetVehicleInfoData);
+    connect(tcp_client.get(), &TcpClient::sendLogMessage, this, &RouteViewer::slotRecvLogMessage);
+    connect(tcp_client.get(), &TcpClient::connectionAbandoned, this, [this]() {
         LOG_ERROR("Connection to simulator abandoned — exiting viewer");
         is_connection_abandoned = true;
     });
 
     tcp_client->init(settings.tcp_config);
 
-    GUIparams->tcp_client = tcp_client;
+    GUIparams->tcp_client = tcp_client.get();
 
     LOG_INFO("TCP-client is initialized...OK");
 }
@@ -929,8 +922,8 @@ void RouteViewer::slotGetSignalsData(QByteArray &sig_data)
 
     root->addChild(traffic_lights_handler->getNode());
 
-    connect(tcp_client, &TcpClient::updateSignal,
-            traffic_lights_handler, &TrafficLightsHandler::slotUpdateSignal);
+    connect(tcp_client.get(), &TcpClient::updateSignal,
+            traffic_lights_handler.get(), &TrafficLightsHandler::slotUpdateSignal);
 
     LOG_INFO("Send request for vehicles info");
     tcp_client->sendRequest(STYPE_REQUEST_VEHICLES_INFO);
@@ -958,20 +951,20 @@ void RouteViewer::slotGetVehicleInfoData(QByteArray &data)
         return;
     }
 
-    connect(tcp_client, &TcpClient::setTrainInfo,
-            vehicles_handler, &VehiclesHandler::slotGetTrainsData, Qt::DirectConnection);
+    connect(tcp_client.get(), &TcpClient::setTrainInfo,
+            vehicles_handler.get(), &VehiclesHandler::slotGetTrainsData);
 
-    connect(tcp_client, &TcpClient::setVehiclesPositions,
-            vehicles_handler, &VehiclesHandler::slotGetVehiclesPosData, Qt::DirectConnection);
+    connect(tcp_client.get(), &TcpClient::setVehiclesPositions,
+            vehicles_handler.get(), &VehiclesHandler::slotGetVehiclesPosData);
 
-    connect(tcp_client, &TcpClient::setVehiclesData,
-            vehicles_handler, &VehiclesHandler::slotGetVehiclesStateData, Qt::DirectConnection);
+    connect(tcp_client.get(), &TcpClient::setVehiclesData,
+            vehicles_handler.get(), &VehiclesHandler::slotGetVehiclesStateData);
 
-    connect(tcp_client, &TcpClient::setVehicleControlled,
-            vehicles_handler, &VehiclesHandler::slotGetVehicleControlled, Qt::DirectConnection);
+    connect(tcp_client.get(), &TcpClient::setVehicleControlled,
+            vehicles_handler.get(), &VehiclesHandler::slotGetVehicleControlled);
 
-    connect(vehicles_handler, &VehiclesHandler::updated,
-            this, &RouteViewer::slotUpdated, Qt::DirectConnection);
+    connect(vehicles_handler.get(), &VehiclesHandler::updated,
+            this, &RouteViewer::slotUpdated);
 
     root->addChild(vehicles_handler->getExterior());
 

@@ -14,7 +14,6 @@
 #include <QString>
 
 #include <array>
-#include <functional>
 #include <vector>
 
 struct settings_t;
@@ -76,9 +75,11 @@ public:
     {
         autopilot_timetable_t timetable;
 
-        if (update_vehicles[0].vehicles[cur_vehicle].timetableData.size() != 0)
+        if (cur_vehicle >= 0
+            && static_cast<size_t>(cur_vehicle) < state_front.vehicles.size()
+            && !state_front.vehicles[cur_vehicle].timetableData.isEmpty())
         {
-            timetable.deserialize(update_vehicles[0].vehicles[cur_vehicle].timetableData);
+            timetable.deserialize(state_front.vehicles[cur_vehicle].timetableData);
         }
 
         return timetable;
@@ -94,39 +95,33 @@ signals:
     void updated();
 
 private:
-    void getVehiclesPosData1(QByteArray& data);
-    void getVehiclesPosData2(QByteArray& data);
-    void getVehiclesPosData3(QByteArray& data);
-    void getVehiclesPosData4(QByteArray& data);
-
     void updateDebugString();
+
+    /// Advance interpolation read head when client_time catches up
+    void advanceInterpolation(double client_time);
 
 private:
     SoundManager* sound_manager;
-    const vsg::dvec3* camera_pos;
+    const vsg::dvec3* camera_pos = nullptr;
 
-    /// Data about vehicles positions, received from server
-    static constexpr int DATA_ARRAY_SIZE = 5;
-    std::array<simulator_update_pos_t, DATA_ARRAY_SIZE> update_pos_data;
-    bool is_pos_updated = false;
-    short new_data = -1;
-    short delay_data = -1;
-    short cur_data = -1;
-    short old_data = -1;
-    short unused_data = -1;
+    /// Position data ring buffer — single-threaded (all via QueuedConnection)
+    static constexpr size_t POS_BUF_SIZE = 5;
+    std::array<simulator_update_pos_t, POS_BUF_SIZE> pos_buf;
+    size_t pos_write = 0;      ///< Next write slot (wraps around POS_BUF_SIZE)
+    size_t pos_count = 0;      ///< Total frames received (saturates at POS_BUF_SIZE)
+    size_t pos_read = 0;       ///< Current interpolation target index
+    size_t pos_read_prev = 0;  ///< Previous frame for interpolation
+
     double ref_time = 0.0;
     double time_difference = 0.0;
     double settings_delay = 0.17;
 
     /// Data about trains, received from server
-    simulator_trains_update_t update_trains = simulator_trains_update_t();
+    simulator_trains_update_t update_trains;
 
-    /// Data about vehicles state, received from server
-    static constexpr int STATE_ARRAY_SIZE = 2;
-    std::array<simulator_vehicles_update_t, STATE_ARRAY_SIZE> update_vehicles;
-    bool is_state_updated = false;
-    short new_state = 0;
-    short unused_state = 1;
+    /// Vehicle state double buffer
+    simulator_vehicles_update_t state_front;
+    simulator_vehicles_update_t state_back;
     bool is_new_state = false;
 
     /// Data about vehicles, received from server
@@ -145,15 +140,13 @@ private:
     int controlled_vehicle = 0;
 
     /// Debug message for current and controlled vehicles from server
-    QString debug_message = "";
+    QString debug_message;
 
     /// Train exterior scene group
     vsg::ref_ptr<vsg::Group> vehicles_node = vsg::Group::create();
 
     /// Info about vehicles exterior
     std::vector<VehicleExterior> vehicles;
-
-    std::function<void(QByteArray&)> current_get_vehicles_pos_data_function;
 };
 
 #endif // VEHICLES_HANDLER_H
