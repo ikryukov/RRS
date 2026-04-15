@@ -115,7 +115,7 @@ private:
     size_t pos_read = 0;               ///< Current interpolation target (render thread only)
     size_t pos_read_prev = 0;          ///< Previous frame for interpolation (render thread only)
 
-    double ref_time = 0.0;
+    std::atomic<double> ref_time{0.0};
     std::atomic<double> time_difference{0.0};
     double settings_delay = 0.17;
 

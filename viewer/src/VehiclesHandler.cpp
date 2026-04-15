@@ -129,7 +129,7 @@ QString VehiclesHandler::getDebugMessage() const noexcept
 //------------------------------------------------------------------------------
 void VehiclesHandler::step(double t, double dt)
 {
-    ref_time = t;
+    ref_time.store(t, std::memory_order_relaxed);
     if (isUpdated())
     {
         if (!is_updated)
@@ -157,11 +157,12 @@ void VehiclesHandler::step(double t, double dt)
         is_new_state = false;
     }
 
-    // Interframe interpolation
+    // Interframe interpolation — clamp to [0,1] to prevent extrapolation overshoot
     const auto& frame_cur  = pos_buf[pos_read      % POS_BUF_SIZE];
     const auto& frame_prev = pos_buf[pos_read_prev  % POS_BUF_SIZE];
     const double upd_dt = frame_cur.sim_time.simulation_seconds - frame_prev.sim_time.simulation_seconds;
-    const double r = (upd_dt > 0.0) ? (client_time - frame_prev.sim_time.simulation_seconds) / upd_dt : 0.0;
+    const double r_raw = (upd_dt > 0.0) ? (client_time - frame_prev.sim_time.simulation_seconds) / upd_dt : 0.0;
+    const double r = std::clamp(r_raw, 0.0, 1.0);
     const double k = (1.0 - r);
 
     for (std::size_t i = 0; i < vehicles.size(); ++i)
@@ -194,7 +195,7 @@ void VehiclesHandler::step(double t, double dt)
         // Apply vehicle body matrix transform
         vehicles[i].transform->matrix = vsg::translate(vehicles[i].position) * rotate_matrix;
 
-        if (update_state)
+        if (upd_dt > 0.0)
         {
             vehicles[i].velocity = vsg::dvec3(
                 (frame_cur.vehicles[i].position_x - frame_prev.vehicles[i].position_x) / upd_dt,
@@ -457,8 +458,9 @@ void VehiclesHandler::slotGetVehiclesPosData(QByteArray& data)
     const size_t count = pos_count.load(std::memory_order_relaxed);
     const double alpha = (count < 3) ? 0.5 : 0.05;
     const double td = time_difference.load(std::memory_order_relaxed);
+    const double rt = ref_time.load(std::memory_order_relaxed);
     time_difference.store(td * (1.0 - alpha) +
-        (pos_buf[slot].sim_time.simulation_seconds - ref_time - settings_delay) * alpha,
+        (pos_buf[slot].sim_time.simulation_seconds - rt - settings_delay) * alpha,
         std::memory_order_relaxed);
 
     // Publish: data is fully written, now make it visible to the reader
