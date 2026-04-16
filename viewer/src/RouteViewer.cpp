@@ -365,7 +365,10 @@ void RouteViewer::initWindowTraits()
     windowTraits->debugUtils = settings.enableDebugUtils;
 
     // Настройка вертикальной синхронизации (упрощенно - вкл/выкл)
-    windowTraits->swapchainPreferences.presentMode = settings.vsync ? VK_PRESENT_MODE_FIFO_KHR
+    // MAILBOX = triple-buffered, no tearing, no stall on missed vsync
+    // FIFO = double-buffered, waits for next vsync on miss (causes hitching)
+    // IMMEDIATE = no sync at all (tearing)
+    windowTraits->swapchainPreferences.presentMode = settings.vsync ? VK_PRESENT_MODE_MAILBOX_KHR
                                                                     : VK_PRESENT_MODE_IMMEDIATE_KHR;
 
     // auto deviceFeatures = windowTraits->deviceFeatures = vsg::DeviceFeatures::create(); // VSG и так создает deviceFeatures по умолчанию
