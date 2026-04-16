@@ -104,7 +104,7 @@ int VehiclesHandler::getCurrentTrainIndex() const noexcept
 //------------------------------------------------------------------------------
 bool VehiclesHandler::isUpdated() const noexcept
 {
-    return pos_count >= 3 && is_new_state;
+    return pos_count >= 3;
 }
 
 //------------------------------------------------------------------------------
