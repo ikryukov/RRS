@@ -48,6 +48,10 @@
 #include <vsg/state/VertexInputState.h>
 #include <vsg/state/ViewDependentState.h>
 #include <vsg/threading/OperationThreads.h>
+
+#include <algorithm>
+#include <cmath>
+#include <map>
 #include <vsg/utils/ShaderSet.h>
 #include <vsg/utils/SharedObjects.h>
 #include <vsg/vk/DeviceFeatures.h>
@@ -801,16 +805,20 @@ bool RouteViewer::loadRoute()
     loader.parse_objects_ref(route);
     loader.parse_route_map(route);
 
-    // Создание PagedLOD для моделей в маршруте
-    vsg::ref_ptr<vsg::Group> route_root = vsg::Group::create();
+    // Собираем все объекты с координатами для пространственной группировки
+    struct PlacedObject {
+        std::string model_path;
+        vsg::ref_ptr<vsg::CullNode> node;
+        double x, y, z;
+    };
+    std::vector<PlacedObject> all_objects;
+    all_objects.reserve(4096);
 
     for (auto& [label, transforms] : route.route_map)
     {
         auto found_it = route.object_ref.find(label);
         if (found_it == route.object_ref.end())
-        {
             continue;
-        }
 
         const std::string model_filename_path = route_dir_path + found_it->second;
         if (!vsg::fileExists(model_filename_path))
@@ -819,42 +827,68 @@ bool RouteViewer::loadRoute()
             continue;
         }
 
+        auto pagedLOD = vsg::PagedLOD::create();
+        pagedLOD->bound = vsg::dsphere(vsg::dvec3(0.0, 0.0, 0.0), settings.view_distance);
+        pagedLOD->children[0] = vsg::PagedLOD::Child{0.1, {}};
+        pagedLOD->filename = model_filename_path;
+        pagedLOD->options = options;
+
+        for (auto& transform : transforms)
         {
-            auto pagedLOD = vsg::PagedLOD::create();
-            pagedLOD->bound = vsg::dsphere(vsg::dvec3(0.0, 0.0, 0.0), settings.view_distance);
-            pagedLOD->children[0] = vsg::PagedLOD::Child{0.1, {}};
-            pagedLOD->filename = model_filename_path;
-            pagedLOD->options = options;
+            vsg::vec3& rotation_deg = transform.rotation_deg;
+            auto matrix = vsg::MatrixTransform::create();
+            rotation_deg.x = -vsg::radians(rotation_deg.x);
+            rotation_deg.y = -vsg::radians(rotation_deg.y);
+            rotation_deg.z = -vsg::radians(rotation_deg.z);
 
-            for (auto& transform : transforms)
-            {
-                vsg::vec3& rotation_deg = transform.rotation_deg;
+            matrix->matrix = vsg::translate(transform.translation)
+                * vsg::rotate(rotation_deg.z, vsg::vec3(0.0f, 0.0f, 1.0f))
+                * vsg::rotate(rotation_deg.y, vsg::vec3(0.0f, 1.0f, 0.0f))
+                * vsg::rotate(rotation_deg.x, vsg::vec3(1.0f, 0.0f, 0.0f));
+            matrix->addChild(pagedLOD);
 
-                auto matrix = vsg::MatrixTransform::create();
-                rotation_deg.x = -vsg::radians(rotation_deg.x);
-                rotation_deg.y = -vsg::radians(rotation_deg.y);
-                rotation_deg.z = -vsg::radians(rotation_deg.z);
-
-                auto rotate_x = vsg::rotate(rotation_deg.x, vsg::vec3(1.0f, 0.0f, 0.0f));
-                auto rotate_y = vsg::rotate(rotation_deg.y, vsg::vec3(0.0f, 1.0f, 0.0f));
-                auto rotate_z = vsg::rotate(rotation_deg.z, vsg::vec3(0.0f, 0.0f, 1.0f));
-                auto translate = vsg::translate(transform.translation);
-
-                matrix->matrix = translate * rotate_z * rotate_y * rotate_x;
-                matrix->addChild(pagedLOD);
-
-                // Frustum-cull before the matrix push
-                vsg::dsphere cullBound(vsg::dvec3(matrix->matrix[3][0], matrix->matrix[3][1], matrix->matrix[3][2]),
-                                      settings.cull_radius);
-                auto cullNode = vsg::CullNode::create(cullBound, matrix);
-                route_root->addChild(cullNode);
-            }
+            double px = matrix->matrix[3][0], py = matrix->matrix[3][1], pz = matrix->matrix[3][2];
+            auto cullNode = vsg::CullNode::create(
+                vsg::dsphere(vsg::dvec3(px, py, pz), settings.cull_radius), matrix);
+            all_objects.push_back({model_filename_path, cullNode, px, py, pz});
         }
     }
 
     route.object_ref.clear();
     route.route_map.clear();
 
+    // Сортировка по модели для уменьшения state changes (одинаковые pipeline подряд)
+    std::sort(all_objects.begin(), all_objects.end(),
+        [](const PlacedObject& a, const PlacedObject& b) { return a.model_path < b.model_path; });
+
+    // Пространственная сетка для иерархического frustum culling
+    constexpr double CELL_SIZE = 2000.0;
+    struct CellKey { int cx, cz; bool operator<(const CellKey& o) const { return cx < o.cx || (cx == o.cx && cz < o.cz); } };
+    struct Cell {
+        std::vector<vsg::ref_ptr<vsg::CullNode>> objects;
+        double min_x=1e18, min_y=1e18, min_z=1e18, max_x=-1e18, max_y=-1e18, max_z=-1e18;
+    };
+    std::map<CellKey, Cell> grid;
+    for (auto& obj : all_objects) {
+        auto& cell = grid[{int(std::floor(obj.x/CELL_SIZE)), int(std::floor(obj.z/CELL_SIZE))}];
+        cell.objects.push_back(obj.node);
+        cell.min_x=std::min(cell.min_x,obj.x); cell.min_y=std::min(cell.min_y,obj.y); cell.min_z=std::min(cell.min_z,obj.z);
+        cell.max_x=std::max(cell.max_x,obj.x); cell.max_y=std::max(cell.max_y,obj.y); cell.max_z=std::max(cell.max_z,obj.z);
+    }
+
+    vsg::ref_ptr<vsg::Group> route_root = vsg::Group::create();
+    for (auto& [key, cell] : grid) {
+        double cx=(cell.min_x+cell.max_x)*0.5, cy=(cell.min_y+cell.max_y)*0.5, cz=(cell.min_z+cell.max_z)*0.5;
+        double dx=(cell.max_x-cell.min_x)*0.5+settings.cull_radius;
+        double dy=(cell.max_y-cell.min_y)*0.5+settings.cull_radius;
+        double dz=(cell.max_z-cell.min_z)*0.5+settings.cull_radius;
+        auto cell_group = vsg::Group::create();
+        for (auto& n : cell.objects) cell_group->addChild(n);
+        route_root->addChild(vsg::CullNode::create(
+            vsg::dsphere(vsg::dvec3(cx,cy,cz), std::sqrt(dx*dx+dy*dy+dz*dz)), cell_group));
+    }
+
+    LOG_INFO("Route: %zu objects in %zu cells (%.0fm grid)", all_objects.size(), grid.size(), CELL_SIZE);
     root->addChild(route_root);
 
     return true;
