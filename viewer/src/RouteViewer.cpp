@@ -52,6 +52,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <vsg/nodes/InstanceNode.h>
+
 #include <vsg/utils/ShaderSet.h>
 #include <vsg/utils/SharedObjects.h>
 #include <vsg/vk/DeviceFeatures.h>
@@ -197,6 +199,9 @@ int RouteViewer::run()
               std::chrono::duration<double>(1.0 / settings.max_fps))
         : std::chrono::microseconds(0);
 
+    size_t frame_count = 0;
+    auto bench_start = clock::now();
+
     while (viewer->advanceToNextFrame())
     {
         try
@@ -207,6 +212,20 @@ int RouteViewer::run()
 
             viewer->handleEvents();
             viewer->update();
+
+            // Flush deferred InstanceNodes from background loading threads
+            {
+                std::lock_guard<std::mutex> lock(pending_nodes_mutex);
+                for (auto& node : pending_nodes)
+                {
+                    route_root->addChild(node);
+                    auto result = viewer->compileManager->compile(node);
+                    if (result.requiresViewerUpdate()) vsg::updateViewer(*viewer, result);
+                }
+                if (!pending_nodes.empty())
+                    LOG_INFO("Flushed %zu InstanceNodes into scene", pending_nodes.size());
+                pending_nodes.clear();
+            }
 
             if (screenshot_writer && screenshot_writer->isScreeenshot())
             {
@@ -234,6 +253,13 @@ int RouteViewer::run()
         catch (const std::exception& e)
         {
             LOG_ERROR("Exception in render loop: %s", e.what());
+            break;
+        }
+
+        ++frame_count;
+        double elapsed = std::chrono::duration<double>(clock::now() - bench_start).count();
+        if (elapsed >= 60.0) {
+            LOG_INFO("=== BENCHMARK: %zu frames in %.1fs = %.1f FPS ===", frame_count, elapsed, frame_count/elapsed);
             break;
         }
     }
@@ -888,7 +914,115 @@ bool RouteViewer::loadRoute()
             vsg::dsphere(vsg::dvec3(cx,cy,cz), std::sqrt(dx*dx+dy*dy+dz*dz)), cell_group));
     }
 
+    // --- Instanced rendering for high-instance models ---
+    constexpr size_t INSTANCE_THRESHOLD = 1000;
+
+    // Count instances per model
+    std::map<std::string, size_t> model_counts;
+    for (auto& obj : all_objects) model_counts[obj.model_path]++;
+
+    size_t total_instanced = 0;
+    std::map<std::string, std::vector<size_t>> instanced_models; // model → indices
+    for (auto& [path, count] : model_counts) {
+        if (count >= INSTANCE_THRESHOLD) {
+            auto& indices = instanced_models[path];
+            for (size_t i = 0; i < all_objects.size(); i++)
+                if (all_objects[i].model_path == path) indices.push_back(i);
+            total_instanced += count;
+        }
+    }
+
     LOG_INFO("Route: %zu objects in %zu cells (%.0fm grid)", all_objects.size(), grid.size(), CELL_SIZE);
+    LOG_INFO("  Instanced (>%zu): %zu models, %zu objects",
+             INSTANCE_THRESHOLD, instanced_models.size(), total_instanced);
+
+    // Queue instance operations — processed by a single background thread to avoid I/O contention
+    std::vector<vsg::ref_ptr<vsg::Operation>> pending_ops;
+    {
+        for (auto& [model_path, indices] : instanced_models)
+        {
+            // Pre-decompose matrices on main thread (all_objects is local)
+            auto pre_translations = vsg::vec3Array::create(indices.size());
+            auto pre_rotations = vsg::quatArray::create(indices.size());
+            auto pre_scales = vsg::vec3Array::create(indices.size());
+            double bmin_x=1e18,bmin_y=1e18,bmin_z=1e18,bmax_x=-1e18,bmax_y=-1e18,bmax_z=-1e18;
+
+            for (size_t i = 0; i < indices.size(); i++) {
+                auto& o = all_objects[indices[i]];
+                auto mt = o.node->child.cast<vsg::MatrixTransform>();
+                if (!mt) continue;
+                vsg::dvec3 dt; vsg::dquat dr; vsg::dvec3 ds;
+                vsg::decompose(mt->matrix, dt, dr, ds);
+                pre_translations->at(i) = vsg::vec3(float(dt.x),float(dt.y),float(dt.z));
+                pre_rotations->at(i) = vsg::quat(float(dr.x),float(dr.y),float(dr.z),float(dr.w));
+                pre_scales->at(i) = vsg::vec3(float(ds.x),float(ds.y),float(ds.z));
+                bmin_x=std::min(bmin_x,dt.x); bmin_y=std::min(bmin_y,dt.y); bmin_z=std::min(bmin_z,dt.z);
+                bmax_x=std::max(bmax_x,dt.x); bmax_y=std::max(bmax_y,dt.y); bmax_z=std::max(bmax_z,dt.z);
+            }
+
+            double cx=(bmin_x+bmax_x)*0.5, cy=(bmin_y+bmax_y)*0.5, cz=(bmin_z+bmax_z)*0.5;
+            double dx=(bmax_x-bmin_x)*0.5+settings.view_distance;
+            double dy=(bmax_y-bmin_y)*0.5+settings.view_distance;
+            double dz=(bmax_z-bmin_z)*0.5+settings.view_distance;
+            double cull_radius = std::sqrt(dx*dx+dy*dy+dz*dz);
+
+            struct LoadInstanceOp : public vsg::Operation {
+                std::string path;
+                vsg::ref_ptr<vsg::vec3Array> translations;
+                vsg::ref_ptr<vsg::quatArray> rotations;
+                vsg::ref_ptr<vsg::vec3Array> scales;
+                vsg::dsphere bound;
+                uint32_t count;
+                vsg::ref_ptr<const vsg::Options> options;
+                std::mutex* mutex;
+                std::vector<vsg::ref_ptr<vsg::Node>>* pending;
+
+                void run() override {
+                    auto obj = vsg::read(path, options);
+                    auto model = obj.cast<vsg::Node>();
+                    if (!model) return;
+
+                    // Convert VertexIndexDraw → InstanceDrawIndexed
+
+                    auto inst = vsg::InstanceNode::create();
+                    inst->instanceCount = count;
+                    inst->setTranslations(translations);
+                    inst->setRotations(rotations);
+                    inst->setScales(scales);
+                    inst->child = model;
+
+                    auto cull = vsg::CullNode::create(bound, inst);
+
+                    std::lock_guard<std::mutex> lock(*mutex);
+                    pending->push_back(cull);
+                }
+            };
+
+            auto op = vsg::ref_ptr<LoadInstanceOp>(new LoadInstanceOp());
+            op->path = model_path;
+            op->translations = pre_translations;
+            op->rotations = pre_rotations;
+            op->scales = pre_scales;
+            op->bound = vsg::dsphere(vsg::dvec3(cx,cy,cz), cull_radius);
+            op->count = static_cast<uint32_t>(indices.size());
+            op->options = options;
+            op->mutex = &pending_nodes_mutex;
+            op->pending = &pending_nodes;
+
+            pending_ops.push_back(op);
+        }
+
+        // Single background thread processes all instanced models sequentially
+        if (!pending_ops.empty()) {
+            auto ops = std::make_shared<std::vector<vsg::ref_ptr<vsg::Operation>>>(std::move(pending_ops));
+            std::thread([ops]() {
+                for (auto& op : *ops) op->run();
+            }).detach();
+            LOG_INFO("  Instance loader thread started for %zu models", ops->size());
+        }
+    }
+
+    this->route_root = route_root;
     root->addChild(route_root);
 
     return true;
