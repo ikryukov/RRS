@@ -4,10 +4,7 @@
 #include "settings.h"
 
 #include <vsg/core/ref_ptr.h>
-#include <vsg/nodes/Group.h>
 #include <memory>
-#include <mutex>
-#include <vector>
 
 class  CfgReader;
 class  FileSystem;
@@ -138,11 +135,6 @@ private:
     vsg::ref_ptr<vsg::View>          view;
     vsg::ref_ptr<vsg::CommandGraph>  commandGraph;
     vsg::ref_ptr<vsg::Viewer>        viewer;
-
-    // Pending InstanceNodes from background loading threads
-    std::mutex                                          pending_nodes_mutex;
-    std::vector<vsg::ref_ptr<vsg::Node>>                pending_nodes;
-    vsg::ref_ptr<vsg::Group>                            route_root;
 
     vsg::ref_ptr<vsg::Group>             root;
     vsg::ref_ptr<vsg::ShadowSettings>    shadowSettings;
