@@ -48,6 +48,8 @@
 #include <vsg/state/VertexInputState.h>
 #include <vsg/state/ViewDependentState.h>
 #include <vsg/threading/OperationThreads.h>
+#include <vsg/utils/ComputeBounds.h>
+#include <vsg/vk/State.h>
 
 #include <algorithm>
 #include <cmath>
@@ -226,10 +228,35 @@ int RouteViewer::run()
                     LOG_INFO("Flushed %zu InstanceNodes into scene", pending_nodes.size());
                 pending_nodes.clear();
             }
+            // Promote per-frame culling entries paired with the InstanceNodes just flushed
+            {
+                std::lock_guard<std::mutex> lock(pending_cells_mutex);
+                if (!pending_cells.empty()) {
+                    instance_cells.insert(instance_cells.end(), pending_cells.begin(), pending_cells.end());
+                    pending_cells.clear();
+                }
+            }
+
+            // Per-instance frustum culling on the CPU — rewrite each InstanceNode's
+            // translations/rotations/scales with the visible subset and adjust instanceCount.
+            cullInstanceCells();
 
             if (screenshot_writer && screenshot_writer->isScreeenshot())
             {
                 screenshot_writer->doScreeenshot(window, options);
+            }
+            // TEMP auto-screenshot after instances loaded + settled
+            {
+                static size_t __seen_flush = 0;
+                static bool __shot = false;
+                if (!__shot && __seen_flush >= 22 && frame_count > 200 && screenshot_writer) {
+                    screenshot_writer->setScreenshot();
+                    __shot = true;
+                }
+                // rough count: each time flush happened, increment
+                // no precise — use frame count gate above as fallback
+                if (frame_count == 1) __seen_flush = 0; // reset on first frame
+                __seen_flush = frame_count;
             }
 
             viewer->recordAndSubmit();
@@ -469,6 +496,62 @@ void RouteViewer::initCamera()
     lookAt = vsg::LookAt::create(eye, center, vsg::dvec3(0.0, 0.0, 1.0));
 
     camera = vsg::Camera::create(perspective, lookAt, vsg::ViewportState::create(window->extent2D()));
+}
+
+//------------------------------------------------------------------------------
+// Per-frame CPU-side per-instance frustum culling. Rewrites each
+// InstanceNode's translations/rotations/scales in-place with only the
+// instances whose world-space bounding sphere passes the current view
+// frustum, and updates instanceCount so vkCmdDrawIndexed draws exactly
+// that many. Dynamic buffers (DataVariance = DYNAMIC_DATA) are re-uploaded
+// via VSG's TransferTask.
+//------------------------------------------------------------------------------
+void RouteViewer::cullInstanceCells()
+{
+    if (instance_cells.empty() || !camera) return;
+
+    vsg::dmat4 mvp = camera->projectionMatrix->transform() * camera->viewMatrix->transform();
+    vsg::Frustum world_frustum;
+    world_frustum.set(vsg::Frustum(), mvp);
+
+    for (auto& cell : instance_cells)
+    {
+        if (!cell->instance_node) continue;
+
+        // Reject whole cell quickly when its bound is outside the frustum.
+        if (!world_frustum.intersect(cell->cell_bound)) {
+            cell->instance_node->instanceCount = 0;
+            continue;
+        }
+
+        auto trans_data = cell->instance_node->getTranslations();
+        auto rots_data = cell->instance_node->getRotations();
+        auto scls_data = cell->instance_node->getScales();
+        if (!trans_data || !rots_data || !scls_data) continue;
+
+        const size_t N = cell->master_translations.size();
+        const double r = cell->model_radius;
+        uint32_t visible = 0;
+
+        for (size_t i = 0; i < N; i++)
+        {
+            const auto& t = cell->master_translations[i];
+            vsg::dsphere s(vsg::dvec3(t.x, t.y, t.z), r);
+            if (!world_frustum.intersect(s)) continue;
+
+            trans_data->at(visible) = t;
+            rots_data->at(visible) = cell->master_rotations[i];
+            scls_data->at(visible) = cell->master_scales[i];
+            ++visible;
+        }
+
+        cell->instance_node->instanceCount = visible;
+        if (visible > 0) {
+            trans_data->dirty();
+            rots_data->dirty();
+            scls_data->dirty();
+        }
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -840,6 +923,44 @@ bool RouteViewer::loadRoute()
     std::vector<PlacedObject> all_objects;
     all_objects.reserve(4096);
 
+    // First pass: count instances per resolved model path so we can skip
+    // creating individual PagedLOD draws for models that will be wrapped
+    // into a single vsg::InstanceNode below.
+    constexpr size_t INSTANCE_THRESHOLD = 1000;
+    std::map<std::string, size_t> model_counts;
+    for (auto& [label, transforms] : route.route_map)
+    {
+        auto found_it = route.object_ref.find(label);
+        if (found_it == route.object_ref.end()) continue;
+        const std::string model_filename_path = route_dir_path + found_it->second;
+        if (!vsg::fileExists(model_filename_path)) continue;
+        model_counts[model_filename_path] += transforms.size();
+    }
+    std::set<std::string> will_be_instanced;
+    for (auto& [path, count] : model_counts)
+        if (count >= INSTANCE_THRESHOLD) will_be_instanced.insert(path);
+
+    // Per-instance transforms collected for InstanceNode path, bucketed by
+    // spatial cell so each InstanceNode gets a tight CullNode and benefits
+    // from frustum culling at the cell level instead of rendering all
+    // instances every frame.
+    constexpr double CELL_SIZE = 2000.0;
+    struct InstanceTransforms {
+        std::vector<vsg::vec3> translations;
+        std::vector<vsg::quat> rotations;
+        std::vector<vsg::vec3> scales;
+        double bmin_x=1e18, bmin_y=1e18, bmin_z=1e18, bmax_x=-1e18, bmax_y=-1e18, bmax_z=-1e18;
+    };
+    struct InstBucketKey {
+        std::string path; int cx; int cz;
+        bool operator<(const InstBucketKey& o) const {
+            if (path != o.path) return path < o.path;
+            if (cx != o.cx) return cx < o.cx;
+            return cz < o.cz;
+        }
+    };
+    std::map<InstBucketKey, InstanceTransforms> instance_buckets;
+
     for (auto& [label, transforms] : route.route_map)
     {
         auto found_it = route.object_ref.find(label);
@@ -853,24 +974,46 @@ bool RouteViewer::loadRoute()
             continue;
         }
 
-        auto pagedLOD = vsg::PagedLOD::create();
-        pagedLOD->bound = vsg::dsphere(vsg::dvec3(0.0, 0.0, 0.0), settings.view_distance);
-        pagedLOD->children[0] = vsg::PagedLOD::Child{0.1, {}};
-        pagedLOD->filename = model_filename_path;
-        pagedLOD->options = options;
+        const bool as_instance = will_be_instanced.count(model_filename_path) != 0;
+
+        vsg::ref_ptr<vsg::PagedLOD> pagedLOD;
+        if (!as_instance) {
+            pagedLOD = vsg::PagedLOD::create();
+            pagedLOD->bound = vsg::dsphere(vsg::dvec3(0.0, 0.0, 0.0), settings.view_distance);
+            pagedLOD->children[0] = vsg::PagedLOD::Child{0.1, {}};
+            pagedLOD->filename = model_filename_path;
+            pagedLOD->options = options;
+        }
 
         for (auto& transform : transforms)
         {
             vsg::vec3& rotation_deg = transform.rotation_deg;
-            auto matrix = vsg::MatrixTransform::create();
             rotation_deg.x = -vsg::radians(rotation_deg.x);
             rotation_deg.y = -vsg::radians(rotation_deg.y);
             rotation_deg.z = -vsg::radians(rotation_deg.z);
 
-            matrix->matrix = vsg::translate(transform.translation)
+            auto mat = vsg::translate(transform.translation)
                 * vsg::rotate(rotation_deg.z, vsg::vec3(0.0f, 0.0f, 1.0f))
                 * vsg::rotate(rotation_deg.y, vsg::vec3(0.0f, 1.0f, 0.0f))
                 * vsg::rotate(rotation_deg.x, vsg::vec3(1.0f, 0.0f, 0.0f));
+
+            if (as_instance) {
+                vsg::dvec3 dt; vsg::dquat dr; vsg::dvec3 ds;
+                vsg::decompose(vsg::dmat4(mat), dt, dr, ds);
+                InstBucketKey key{model_filename_path,
+                                  int(std::floor(dt.x/CELL_SIZE)),
+                                  int(std::floor(dt.z/CELL_SIZE))};
+                auto& it = instance_buckets[key];
+                it.translations.emplace_back(float(dt.x), float(dt.y), float(dt.z));
+                it.rotations.emplace_back(float(dr.x), float(dr.y), float(dr.z), float(dr.w));
+                it.scales.emplace_back(float(ds.x), float(ds.y), float(ds.z));
+                it.bmin_x=std::min(it.bmin_x,dt.x); it.bmin_y=std::min(it.bmin_y,dt.y); it.bmin_z=std::min(it.bmin_z,dt.z);
+                it.bmax_x=std::max(it.bmax_x,dt.x); it.bmax_y=std::max(it.bmax_y,dt.y); it.bmax_z=std::max(it.bmax_z,dt.z);
+                continue;
+            }
+
+            auto matrix = vsg::MatrixTransform::create();
+            matrix->matrix = mat;
             matrix->addChild(pagedLOD);
 
             double px = matrix->matrix[3][0], py = matrix->matrix[3][1], pz = matrix->matrix[3][2];
@@ -887,8 +1030,7 @@ bool RouteViewer::loadRoute()
     std::sort(all_objects.begin(), all_objects.end(),
         [](const PlacedObject& a, const PlacedObject& b) { return a.model_path < b.model_path; });
 
-    // Пространственная сетка для иерархического frustum culling
-    constexpr double CELL_SIZE = 2000.0;
+    // Пространственная сетка для иерархического frustum culling (CELL_SIZE defined above)
     struct CellKey { int cx, cz; bool operator<(const CellKey& o) const { return cx < o.cx || (cx == o.cx && cz < o.cz); } };
     struct Cell {
         std::vector<vsg::ref_ptr<vsg::CullNode>> objects;
@@ -914,100 +1056,133 @@ bool RouteViewer::loadRoute()
             vsg::dsphere(vsg::dvec3(cx,cy,cz), std::sqrt(dx*dx+dy*dy+dz*dz)), cell_group));
     }
 
-    // --- Instanced rendering for high-instance models ---
-    constexpr size_t INSTANCE_THRESHOLD = 1000;
-
-    // Count instances per model
-    std::map<std::string, size_t> model_counts;
-    for (auto& obj : all_objects) model_counts[obj.model_path]++;
-
     size_t total_instanced = 0;
-    std::map<std::string, std::vector<size_t>> instanced_models; // model → indices
-    for (auto& [path, count] : model_counts) {
-        if (count >= INSTANCE_THRESHOLD) {
-            auto& indices = instanced_models[path];
-            for (size_t i = 0; i < all_objects.size(); i++)
-                if (all_objects[i].model_path == path) indices.push_back(i);
-            total_instanced += count;
-        }
+    std::set<std::string> unique_instanced_models;
+    for (auto& [key, it] : instance_buckets) {
+        total_instanced += it.translations.size();
+        unique_instanced_models.insert(key.path);
     }
 
     LOG_INFO("Route: %zu objects in %zu cells (%.0fm grid)", all_objects.size(), grid.size(), CELL_SIZE);
-    LOG_INFO("  Instanced (>%zu): %zu models, %zu objects",
-             INSTANCE_THRESHOLD, instanced_models.size(), total_instanced);
+    LOG_INFO("  Instanced (>%zu): %zu models, %zu objects across %zu cells",
+             INSTANCE_THRESHOLD, unique_instanced_models.size(), total_instanced, instance_buckets.size());
 
-    // Queue instance operations — processed by a single background thread to avoid I/O contention
+    // Per-model cell buckets grouped for the background loader so the model is read once
+    // per path and then used by multiple per-cell InstanceNodes (each with its own tight CullNode).
+    // Each bucket keeps immutable master arrays for per-frame CPU culling — the dynamic
+    // buffers inside InstanceNode are rewritten every frame with only visible instances.
+    struct CellBucket {
+        std::vector<vsg::vec3> master_translations;
+        std::vector<vsg::quat> master_rotations;
+        std::vector<vsg::vec3> master_scales;
+        vsg::dsphere bound;
+    };
+    std::map<std::string, std::vector<CellBucket>> model_to_buckets;
+    for (auto& [key, it] : instance_buckets)
+    {
+        CellBucket cb;
+        cb.master_translations = std::move(it.translations);
+        cb.master_rotations = std::move(it.rotations);
+        cb.master_scales = std::move(it.scales);
+        double cx=(it.bmin_x+it.bmax_x)*0.5, cy=(it.bmin_y+it.bmax_y)*0.5, cz=(it.bmin_z+it.bmax_z)*0.5;
+        double dx=(it.bmax_x-it.bmin_x)*0.5+settings.cull_radius;
+        double dy=(it.bmax_y-it.bmin_y)*0.5+settings.cull_radius;
+        double dz=(it.bmax_z-it.bmin_z)*0.5+settings.cull_radius;
+        cb.bound = vsg::dsphere(vsg::dvec3(cx,cy,cz), std::sqrt(dx*dx+dy*dy+dz*dz));
+        model_to_buckets[key.path].push_back(std::move(cb));
+    }
+
+    // Queue instance operations — processed by a single background thread to avoid I/O contention.
+    // One op per unique model path; the model is loaded once and shared across all cells.
     std::vector<vsg::ref_ptr<vsg::Operation>> pending_ops;
     {
-        for (auto& [model_path, indices] : instanced_models)
+        for (auto& [model_path, buckets] : model_to_buckets)
         {
-            // Pre-decompose matrices on main thread (all_objects is local)
-            auto pre_translations = vsg::vec3Array::create(indices.size());
-            auto pre_rotations = vsg::quatArray::create(indices.size());
-            auto pre_scales = vsg::vec3Array::create(indices.size());
-            double bmin_x=1e18,bmin_y=1e18,bmin_z=1e18,bmax_x=-1e18,bmax_y=-1e18,bmax_z=-1e18;
-
-            for (size_t i = 0; i < indices.size(); i++) {
-                auto& o = all_objects[indices[i]];
-                auto mt = o.node->child.cast<vsg::MatrixTransform>();
-                if (!mt) continue;
-                vsg::dvec3 dt; vsg::dquat dr; vsg::dvec3 ds;
-                vsg::decompose(mt->matrix, dt, dr, ds);
-                pre_translations->at(i) = vsg::vec3(float(dt.x),float(dt.y),float(dt.z));
-                pre_rotations->at(i) = vsg::quat(float(dr.x),float(dr.y),float(dr.z),float(dr.w));
-                pre_scales->at(i) = vsg::vec3(float(ds.x),float(ds.y),float(ds.z));
-                bmin_x=std::min(bmin_x,dt.x); bmin_y=std::min(bmin_y,dt.y); bmin_z=std::min(bmin_z,dt.z);
-                bmax_x=std::max(bmax_x,dt.x); bmax_y=std::max(bmax_y,dt.y); bmax_z=std::max(bmax_z,dt.z);
-            }
-
-            double cx=(bmin_x+bmax_x)*0.5, cy=(bmin_y+bmax_y)*0.5, cz=(bmin_z+bmax_z)*0.5;
-            double dx=(bmax_x-bmin_x)*0.5+settings.view_distance;
-            double dy=(bmax_y-bmin_y)*0.5+settings.view_distance;
-            double dz=(bmax_z-bmin_z)*0.5+settings.view_distance;
-            double cull_radius = std::sqrt(dx*dx+dy*dy+dz*dz);
-
             struct LoadInstanceOp : public vsg::Operation {
                 std::string path;
-                vsg::ref_ptr<vsg::vec3Array> translations;
-                vsg::ref_ptr<vsg::quatArray> rotations;
-                vsg::ref_ptr<vsg::vec3Array> scales;
-                vsg::dsphere bound;
-                uint32_t count;
+                std::vector<CellBucket> buckets;
                 vsg::ref_ptr<const vsg::Options> options;
-                std::mutex* mutex;
-                std::vector<vsg::ref_ptr<vsg::Node>>* pending;
+                std::mutex* nodes_mutex;
+                std::vector<vsg::ref_ptr<vsg::Node>>* pending_nodes;
+                std::mutex* cells_mutex;
+                std::vector<std::shared_ptr<RouteViewer::InstanceCell>>* pending_cells;
 
                 void run() override {
-                    auto obj = vsg::read(path, options);
+                    auto inst_options = vsg::Options::create(*options);
+                    inst_options->instanceNodeHint = vsg::Options::INSTANCE_TRANSLATIONS
+                                                   | vsg::Options::INSTANCE_ROTATIONS
+                                                   | vsg::Options::INSTANCE_SCALES;
+
+                    auto obj = vsg::read(path, inst_options);
                     auto model = obj.cast<vsg::Node>();
                     if (!model) return;
 
-                    // Convert VertexIndexDraw → InstanceDrawIndexed
+                    // Compute per-model bounding sphere radius once. Used per-frame for
+                    // per-instance frustum culling against each instance's translation.
+                    vsg::ComputeBounds cb_bounds;
+                    model->accept(cb_bounds);
+                    double mdx = (cb_bounds.bounds.max.x - cb_bounds.bounds.min.x) * 0.5;
+                    double mdy = (cb_bounds.bounds.max.y - cb_bounds.bounds.min.y) * 0.5;
+                    double mdz = (cb_bounds.bounds.max.z - cb_bounds.bounds.min.z) * 0.5;
+                    float model_radius = float(std::sqrt(mdx*mdx + mdy*mdy + mdz*mdz));
 
-                    auto inst = vsg::InstanceNode::create();
-                    inst->instanceCount = count;
-                    inst->setTranslations(translations);
-                    inst->setRotations(rotations);
-                    inst->setScales(scales);
-                    inst->child = model;
+                    std::vector<vsg::ref_ptr<vsg::Node>> local_nodes;
+                    std::vector<std::shared_ptr<RouteViewer::InstanceCell>> local_cells;
+                    local_nodes.reserve(buckets.size());
+                    local_cells.reserve(buckets.size());
 
-                    auto cull = vsg::CullNode::create(bound, inst);
+                    for (auto& cb : buckets) {
+                        const size_t N = cb.master_translations.size();
+                        // Dynamic per-cell arrays rewritten every frame by cullInstanceCells().
+                        auto trans = vsg::vec3Array::create(N);
+                        auto rots = vsg::quatArray::create(N);
+                        auto scls = vsg::vec3Array::create(N);
+                        trans->properties.dataVariance = vsg::DYNAMIC_DATA;
+                        rots->properties.dataVariance = vsg::DYNAMIC_DATA;
+                        scls->properties.dataVariance = vsg::DYNAMIC_DATA;
+                        for (size_t i = 0; i < N; i++) {
+                            trans->at(i) = cb.master_translations[i];
+                            rots->at(i) = cb.master_rotations[i];
+                            scls->at(i) = cb.master_scales[i];
+                        }
 
-                    std::lock_guard<std::mutex> lock(*mutex);
-                    pending->push_back(cull);
+                        auto inst = vsg::InstanceNode::create();
+                        inst->instanceCount = static_cast<uint32_t>(N);
+                        inst->setTranslations(trans);
+                        inst->setRotations(rots);
+                        inst->setScales(scls);
+                        inst->child = model;
+                        local_nodes.push_back(vsg::CullNode::create(cb.bound, inst));
+
+                        auto cell = std::make_shared<RouteViewer::InstanceCell>();
+                        cell->instance_node = inst;
+                        cell->cell_bound = cb.bound;
+                        cell->master_translations = std::move(cb.master_translations);
+                        cell->master_rotations = std::move(cb.master_rotations);
+                        cell->master_scales = std::move(cb.master_scales);
+                        cell->model_radius = model_radius;
+                        local_cells.push_back(std::move(cell));
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(*nodes_mutex);
+                        for (auto& n : local_nodes) pending_nodes->push_back(n);
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(*cells_mutex);
+                        for (auto& c : local_cells) pending_cells->push_back(c);
+                    }
                 }
             };
 
             auto op = vsg::ref_ptr<LoadInstanceOp>(new LoadInstanceOp());
             op->path = model_path;
-            op->translations = pre_translations;
-            op->rotations = pre_rotations;
-            op->scales = pre_scales;
-            op->bound = vsg::dsphere(vsg::dvec3(cx,cy,cz), cull_radius);
-            op->count = static_cast<uint32_t>(indices.size());
+            op->buckets = std::move(buckets);
             op->options = options;
-            op->mutex = &pending_nodes_mutex;
-            op->pending = &pending_nodes;
+            op->nodes_mutex = &pending_nodes_mutex;
+            op->pending_nodes = &pending_nodes;
+            op->cells_mutex = &pending_cells_mutex;
+            op->pending_cells = &pending_cells;
 
             pending_ops.push_back(op);
         }

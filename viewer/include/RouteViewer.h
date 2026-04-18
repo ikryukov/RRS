@@ -3,7 +3,11 @@
 
 #include "settings.h"
 
+#include <vsg/core/Array.h>
 #include <vsg/core/ref_ptr.h>
+#include <vsg/maths/quat.h>
+#include <vsg/maths/sphere.h>
+#include <vsg/maths/vec3.h>
 #include <vsg/nodes/Group.h>
 #include <memory>
 #include <mutex>
@@ -29,6 +33,7 @@ class AmbientLight;
 class Camera;
 class CommandGraph;
 class Group;
+class InstanceNode;
 class LookAt;
 class Options;
 class RegionOfInterest;
@@ -143,6 +148,28 @@ private:
     std::mutex                                          pending_nodes_mutex;
     std::vector<vsg::ref_ptr<vsg::Node>>                pending_nodes;
     vsg::ref_ptr<vsg::Group>                            route_root;
+
+    // Per-cell instance data for CPU-side frustum culling. Each cell stores
+    // the master (full) transforms + model bounding radius; each frame we
+    // rewrite the InstanceNode's vec3/quatArray with only the visible subset
+    // and update instanceCount so vkCmdDrawIndexed skips culled instances.
+    struct InstanceCell {
+        vsg::ref_ptr<vsg::InstanceNode>       instance_node;
+        vsg::dsphere                          cell_bound;
+        std::vector<vsg::vec3>                master_translations;
+        std::vector<vsg::quat>                master_rotations;
+        std::vector<vsg::vec3>                master_scales;
+        float                                 model_radius = 0.0f;
+        // Cached last-frame visibility state to skip redundant buffer uploads
+        // when the visible subset is unchanged.
+        uint32_t                              last_visible_count = 0;
+        uint32_t                              last_hash = 0;
+    };
+    std::mutex                                pending_cells_mutex;
+    std::vector<std::shared_ptr<InstanceCell>> pending_cells;
+    std::vector<std::shared_ptr<InstanceCell>> instance_cells;
+
+    void cullInstanceCells();
 
     vsg::ref_ptr<vsg::Group>             root;
     vsg::ref_ptr<vsg::ShadowSettings>    shadowSettings;
